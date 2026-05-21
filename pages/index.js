@@ -87,6 +87,16 @@ export default function Dashboard() {
     return URL.createObjectURL(await res.blob());
   }
 
+  async function callClaude(system, userMessage, maxTokens = 1000) {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ system, messages: [{ role: 'user', content: userMessage }], max_tokens: maxTokens })
+    });
+    const json = await res.json();
+    return json.content?.[0]?.text || 'Unable to respond.';
+  }
+
   async function toggleBriefPlay() {
     if (playing) { audioRef.current?.pause(); setPlaying(false); return; }
     if (audioUrl) { audioRef.current?.play(); setPlaying(true); return; }
@@ -103,14 +113,11 @@ export default function Dashboard() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setVoiceStatus('Not supported. Use Chrome.'); return; }
     const recognition = new SR();
-    recognition.lang = 'en-US'; recognition.interimResults = true; recognition.maxAlternatives = 1;
+    recognition.lang = 'en-US'; recognition.interimResults = true;
     recognitionRef.current = recognition;
     voiceTranscriptRef.current = '';
     recognition.onstart = () => { setListening(true); setVoiceStatus('Listening...'); setVoiceTranscript(''); };
-    recognition.onresult = (e) => {
-      const t = Array.from(e.results).map(r => r[0].transcript).join('');
-      setVoiceTranscript(t); voiceTranscriptRef.current = t;
-    };
+    recognition.onresult = (e) => { const t = Array.from(e.results).map(r => r[0].transcript).join(''); setVoiceTranscript(t); voiceTranscriptRef.current = t; };
     recognition.onend = () => { setListening(false); if (voiceTranscriptRef.current.trim()) handleVoiceQuery(voiceTranscriptRef.current); };
     recognition.onerror = (e) => { setListening(false); setVoiceStatus('Mic error: ' + e.error); };
     recognition.start();
@@ -122,12 +129,10 @@ export default function Dashboard() {
     setVoiceThinking(true); setVoiceStatus('Thinking...');
     setVoiceConvo(c => [...c, { role: 'user', text: transcript }]);
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 200, system: `You are a sharp, friendly CFO assistant for Ola Thai Tapas Bar Bangkok. This is a voice conversation — answer in 1-2 short sentences max. Use real numbers. Data: ${getContext()}`, messages: [{ role: 'user', content: transcript }] })
-      });
-      const json = await res.json();
-      const reply = json.content?.[0]?.text || 'Sorry, I could not get an answer.';
+      const reply = await callClaude(
+        `You are a sharp, friendly CFO assistant for Ola Thai Tapas Bar Bangkok. This is a voice conversation — answer in 1-2 short sentences max. Use real numbers. Data: ${getContext()}`,
+        transcript, 200
+      );
       setVoiceConvo(c => [...c, { role: 'ai', text: reply }]);
       setVoiceThinking(false); setVoiceStatus('Speaking...'); setVoiceSpeaking(true);
       const url = await generateSpeech(reply);
@@ -145,9 +150,11 @@ export default function Dashboard() {
     if (!text.trim() || aiThinking) return;
     setInput(''); setMessages(m => [...m, { role: 'user', text }]); setAiThinking(true);
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1000, system: `You are a sharp CFO assistant for Ola Thai Tapas Bar Bangkok. Give direct answers with real numbers. Keep under 3 sentences. Data: ${getContext()}`, messages: [{ role: 'user', content: text }] }) });
-      const json = await res.json();
-      setMessages(m => [...m, { role: 'ai', text: json.content?.[0]?.text || 'Unable to respond.' }]);
+      const reply = await callClaude(
+        `You are a sharp CFO assistant for Ola Thai Tapas Bar Bangkok. Give direct answers with real numbers. Keep under 3 sentences. Data: ${getContext()}`,
+        text
+      );
+      setMessages(m => [...m, { role: 'ai', text: reply }]);
     } catch { setMessages(m => [...m, { role: 'ai', text: 'Connection error.' }]); }
     setAiThinking(false);
   }
@@ -234,7 +241,6 @@ export default function Dashboard() {
 
         {loading ? <div style={s.loading}>Loading expense data...</div> : !data ? <div style={s.loading}>Failed to load.</div> : (
           <>
-            {/* METRICS */}
             <div style={s.metrics}>
               <div style={s.mc}><div style={s.mcLabel}>Total Spend</div><div style={s.mcVal}>฿{data.totalSpend.toLocaleString()}</div><div style={s.mcSub}>{data.totalReceipts} receipts</div></div>
               <div style={s.mc}><div style={s.mcLabel}>Top Category</div><div style={s.mcValWord}>{data.topCategory.name}</div><div style={s.mcSub}>฿{data.topCategory.amount.toLocaleString()} · {data.topCategory.pct}%</div></div>
@@ -242,14 +248,12 @@ export default function Dashboard() {
               <div style={s.mc}><div style={s.mcLabel}>Categories</div><div style={s.mcVal}>{data.categories.length}</div><div style={s.mcSub}>tracked</div></div>
             </div>
 
-            {/* RISK CARDS */}
             <div style={s.riskRow}>
               <div style={s.riskCard('#e05252')}><div style={s.riskTag('#e05252')}>Top Spend</div><div style={s.riskVal}>{data.topCategory.name} · {data.topCategory.pct}%</div><div style={s.riskSub}>฿{data.topCategory.amount.toLocaleString()} — review weekly</div></div>
               <div style={s.riskCard('#b07d2a')}><div style={s.riskTag('#b07d2a')}>Uncategorised</div><div style={s.riskVal}>{data.categories.find(c=>c.name==='Other')?`฿${data.categories.find(c=>c.name==='Other').amount.toLocaleString()}`:'฿0'}</div><div style={s.riskSub}>Review and recategorise Other</div></div>
               <div style={s.riskCard('#3db88a')}><div style={s.riskTag('#3db88a')}>Voice Logging</div><div style={s.riskVal}>{data.voiceCount} voice notes</div><div style={s.riskSub}>{data.voiceCount>0?'Active via Telegram':'Try Telegram voice bot'}</div></div>
             </div>
 
-            {/* CHARTS */}
             <div style={s.chartsRow}>
               <div style={s.panel}>
                 <div style={s.panelLabel}>Spend by Category</div>
@@ -281,7 +285,6 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* TABLE */}
             <div style={s.tablePanel}>
               <div style={s.panelLabel}>Recent Expenses</div>
               <div style={{borderBottom:'1px solid rgba(255,255,255,0.07)',paddingBottom:8,marginBottom:2}}>
@@ -295,7 +298,6 @@ export default function Dashboard() {
               ); })}
             </div>
 
-            {/* VOICE BRIEF */}
             <div style={s.voicePanel}>
               <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:14}}>
                 <button style={{...s.playBtn,opacity:audioLoading?0.6:1}} onClick={toggleBriefPlay} disabled={audioLoading}>{audioLoading?'⏳':playing?'⏸':'▶'}</button>
@@ -314,42 +316,39 @@ export default function Dashboard() {
               {txOpen && <div style={{fontSize:12,color:'#7a9bb5',lineHeight:1.75,borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:12,marginTop:12}}>"{buildBriefText(data)}"</div>}
             </div>
 
-            {/* TEXT CHAT */}
             <div style={s.chatPanel}>
               <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:16}}>
-                <div style={s.aiDot} /><div><div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>CFO Agent</div><div style={{fontSize:11,color:'#4a6a88'}}>Ask anything about your expenses</div></div>
+                <div style={s.aiDot}/><div><div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>CFO Agent</div><div style={{fontSize:11,color:'#4a6a88'}}>Ask anything about your expenses</div></div>
               </div>
               <div style={s.msgs} ref={msgsRef}>
-                {messages.map((m,i) => (<div style={m.role==='ai'?s.msgAi:s.msgUser} key={i}><div style={m.role==='ai'?s.avAi:s.avUser}>{m.role==='ai'?'AI':'You'}</div><div style={m.role==='ai'?s.bubbleAi:s.bubbleUser}>{m.text}</div></div>))}
-                {aiThinking && <div style={s.msgAi}><div style={s.avAi}>AI</div><div style={{...s.bubbleAi,color:'#4a6a88'}}>Thinking...</div></div>}
+                {messages.map((m,i)=>(<div style={m.role==='ai'?s.msgAi:s.msgUser} key={i}><div style={m.role==='ai'?s.avAi:s.avUser}>{m.role==='ai'?'AI':'You'}</div><div style={m.role==='ai'?s.bubbleAi:s.bubbleUser}>{m.text}</div></div>))}
+                {aiThinking&&<div style={s.msgAi}><div style={s.avAi}>AI</div><div style={{...s.bubbleAi,color:'#4a6a88'}}>Thinking...</div></div>}
               </div>
               <div style={s.qbtns}>{['Where can I cut costs? ↗','Which vendor costs most? ↗','Compare categories ↗'].map((q,i)=>(<button key={i} style={s.qbtn} onClick={()=>sendMessage(q.replace(' ↗',''))}>{q}</button>))}</div>
               <div style={s.inputRow}>
-                <input style={s.chatIn} placeholder="Ask about your expenses..." value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&sendMessage(input)} />
+                <input style={s.chatIn} placeholder="Ask about your expenses..." value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&sendMessage(input)}/>
                 <button style={s.sendBtn} onClick={()=>sendMessage(input)} disabled={aiThinking}>Send ↗</button>
               </div>
             </div>
 
-            {/* LIVE VOICE */}
             <div style={{background:'#07111e',border:`1px solid ${voiceMode?'#2471a3':'rgba(255,255,255,0.06)'}`,borderRadius:10,padding:18,transition:'border-color 0.3s'}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:voiceMode?16:0}}>
                 <div style={{display:'flex',alignItems:'center',gap:10}}>
-                  <div style={{width:8,height:8,borderRadius:'50%',background:voiceMode?'#e05252':'#4a6a88'}} />
+                  <div style={{width:8,height:8,borderRadius:'50%',background:voiceMode?'#e05252':'#4a6a88'}}/>
                   <div><div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>Live Voice CFO</div><div style={{fontSize:11,color:'#4a6a88'}}>Talk to your CFO agent in real time</div></div>
                 </div>
                 <button onClick={()=>{setVoiceMode(v=>!v);setVoiceConvo([]);setVoiceStatus('Press the mic to start');}} style={{fontSize:11,padding:'6px 14px',borderRadius:6,border:'1px solid rgba(255,255,255,0.1)',background:voiceMode?'#1a3a52':'transparent',color:voiceMode?'#7fc8f0':'#6a9cc0',cursor:'pointer',fontFamily:'Inter,sans-serif'}}>
                   {voiceMode?'Close':'Open'}
                 </button>
               </div>
-
-              {voiceMode && (
+              {voiceMode&&(
                 <div>
-                  {voiceConvo.length > 0 && (
+                  {voiceConvo.length>0&&(
                     <div ref={voiceConvoRef} style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16,maxHeight:200,overflowY:'auto',paddingRight:4}}>
                       {voiceConvo.map((m,i)=>(<div style={m.role==='ai'?s.msgAi:s.msgUser} key={i}><div style={m.role==='ai'?s.avAi:s.avUser}>{m.role==='ai'?'AI':'You'}</div><div style={m.role==='ai'?s.bubbleAi:s.bubbleUser}>{m.text}</div></div>))}
                     </div>
                   )}
-                  {(listening||voiceTranscript) && (
+                  {(listening||voiceTranscript)&&(
                     <div style={{background:'#112236',borderRadius:8,padding:'10px 14px',marginBottom:14,fontSize:12,color:listening?'#7fc8f0':'#4a6a88',fontStyle:'italic',minHeight:36}}>
                       {voiceTranscript||'Listening...'}
                     </div>
@@ -359,7 +358,7 @@ export default function Dashboard() {
                   </div>
                   <div style={{display:'flex',justifyContent:'center'}}>
                     <div style={{position:'relative',display:'flex',alignItems:'center',justifyContent:'center',width:72,height:72}}>
-                      {listening&&<><div className="mic-ring" style={{width:72,height:72}} /><div className="mic-ring" style={{width:72,height:72,animationDelay:'0.4s'}} /></>}
+                      {listening&&<><div className="mic-ring" style={{width:72,height:72}}/><div className="mic-ring" style={{width:72,height:72,animationDelay:'0.4s'}}/></>}
                       <button className={listening?'mic-pulse':''} onClick={listening?stopListening:startListening} disabled={voiceThinking||voiceSpeaking}
                         style={{width:64,height:64,borderRadius:'50%',border:'none',cursor:(voiceThinking||voiceSpeaking)?'not-allowed':'pointer',background:listening?'#e05252':(voiceThinking||voiceSpeaking)?'#1a3a52':'#1a5276',color:'white',fontSize:26,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',zIndex:1,transition:'background 0.2s',opacity:(voiceThinking||voiceSpeaking)?0.5:1}}>
                         {voiceThinking?'⏳':voiceSpeaking?'🔊':listening?'⏹':'🎤'}
