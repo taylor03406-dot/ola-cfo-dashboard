@@ -16,10 +16,8 @@ export default function Dashboard() {
   const [audioUrl, setAudioUrl] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
-
-  // Voice mode state
   const [voiceMode, setVoiceMode] = useState(false);
-  const [voiceState, setVoiceState] = useState('idle'); // idle | listening | thinking | speaking
+  const [voiceState, setVoiceState] = useState('idle');
   const [voiceTranscript, setVoiceTranscript] = useState('');
   const [voiceConvo, setVoiceConvo] = useState([]);
 
@@ -31,17 +29,23 @@ export default function Dashboard() {
   const voiceTranscriptRef = useRef('');
   const voiceModeRef = useRef(false);
   const voiceStateRef = useRef('idle');
+  const dataRef = useRef(null);
 
   useEffect(() => {
     fetch('/api/expenses')
       .then(r => r.json())
-      .then(json => { setData(processData(json.records || [])); setLoading(false); })
+      .then(json => {
+        const processed = processData(json.records || []);
+        setData(processed);
+        dataRef.current = processed;
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {
     if (data && messages.length === 0) {
-      setMessages([{ role: 'ai', text: `Total spend ฿${data.totalSpend.toLocaleString()} across ${data.totalReceipts} receipts. Top category is ${data.topCategory.name} at ฿${data.topCategory.amount.toLocaleString()} (${data.topCategory.pct}% of total). Want me to break anything down?` }]);
+      setMessages([{ role: 'ai', text: `Total spend ฿${data.totalSpend.toLocaleString()} across ${data.totalReceipts} receipts. Top category is ${data.topCategory.name} at ฿${data.topCategory.amount.toLocaleString()} (${data.topCategory.pct}% of total). Ask me anything about your expenses.` }]);
     }
   }, [data]);
 
@@ -62,25 +66,111 @@ export default function Dashboard() {
   function processData(records) {
     const cats = {}; let total = 0; const byDate = {};
     records.forEach(r => {
-      const f = r.fields || {}; const amt = parseFloat(f.Amount) || 0; const cat = f.Category || 'Other'; const date = (f.Date || '').split('T')[0];
-      total += amt; cats[cat] = (cats[cat] || 0) + amt; if (date) byDate[date] = (byDate[date] || 0) + amt;
+      const f = r.fields || {};
+      const amt = parseFloat(f.Amount) || 0;
+      const cat = f.Category || 'Other';
+      const date = (f.Date || '').split('T')[0];
+      total += amt;
+      cats[cat] = (cats[cat] || 0) + amt;
+      if (date) byDate[date] = (byDate[date] || 0) + amt;
     });
+
     const sortedCats = Object.entries(cats).sort((a, b) => b[1] - a[1]);
     const maxCat = sortedCats[0] || ['Other', 0];
     const topCategory = { name: maxCat[0], amount: Math.round(maxCat[1]), pct: total > 0 ? Math.round((maxCat[1] / total) * 100) : 0 };
     const voiceCount = records.filter(r => (r.fields?.Source || '').toLowerCase().includes('voice')).length;
-    const recent = records.slice(0, 8).map(r => ({ vendor: r.fields?.Vendor || 'Unknown', amount: parseFloat(r.fields?.Amount) || 0, category: r.fields?.Category || 'Other', date: (r.fields?.Date || '').split('T')[0] }));
-    const sortedDates = Object.entries(byDate).sort((a, b) => a[0].localeCompare(b[0])); const last14 = sortedDates.slice(-14);
-    return { totalSpend: Math.round(total), totalReceipts: records.length, voiceCount, topCategory, categories: sortedCats.map(([name, amt]) => ({ name, amount: Math.round(amt), pct: total > 0 ? Math.round((amt / total) * 100) : 0 })), recent, thisWeek: last14.slice(-7), lastWeek: last14.slice(0, 7) };
+
+    const allRecords = records.map(r => ({
+      vendor: r.fields?.Vendor || 'Unknown',
+      amount: parseFloat(r.fields?.Amount) || 0,
+      category: r.fields?.Category || 'Other',
+      date: (r.fields?.Date || '').split('T')[0],
+      source: r.fields?.Source || '',
+      notes: r.fields?.Notes || '',
+    })).sort((a, b) => b.date.localeCompare(a.date));
+
+    const recent = allRecords.slice(0, 8);
+    const sortedDates = Object.entries(byDate).sort((a, b) => a[0].localeCompare(b[0]));
+    const last14 = sortedDates.slice(-14);
+
+    // Week calculations
+    const now = new Date();
+    const startOfThisWeek = new Date(now); startOfThisWeek.setDate(now.getDate() - ((now.getDay() + 6) % 7)); startOfThisWeek.setHours(0,0,0,0);
+    const startOfLastWeek = new Date(startOfThisWeek); startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
+
+    const thisWeekRecords = allRecords.filter(r => r.date >= startOfThisWeek.toISOString().split('T')[0]);
+    const lastWeekRecords = allRecords.filter(r => r.date >= startOfLastWeek.toISOString().split('T')[0] && r.date < startOfThisWeek.toISOString().split('T')[0]);
+    const thisWeekTotal = thisWeekRecords.reduce((s, r) => s + r.amount, 0);
+    const lastWeekTotal = lastWeekRecords.reduce((s, r) => s + r.amount, 0);
+
+    const sortedByAmount = [...allRecords].sort((a, b) => a.amount - b.amount);
+    const lowestExpense = sortedByAmount[0];
+    const highestExpense = sortedByAmount[sortedByAmount.length - 1];
+
+    return {
+      totalSpend: Math.round(total),
+      totalReceipts: records.length,
+      voiceCount,
+      topCategory,
+      categories: sortedCats.map(([name, amt]) => ({ name, amount: Math.round(amt), pct: total > 0 ? Math.round((amt / total) * 100) : 0 })),
+      recent,
+      allRecords,
+      thisWeek: last14.slice(-7),
+      lastWeek: last14.slice(0, 7),
+      thisWeekRecords,
+      lastWeekRecords,
+      thisWeekTotal: Math.round(thisWeekTotal),
+      lastWeekTotal: Math.round(lastWeekTotal),
+      lowestExpense,
+      highestExpense,
+    };
+  }
+
+  function getFullContext() {
+    const d = dataRef.current;
+    if (!d) return '';
+
+    const allTx = d.allRecords.map(r =>
+      `  ${r.date} | ${r.vendor} | ฿${r.amount} | ${r.category}${r.notes ? ' | ' + r.notes.substring(0, 60) : ''}`
+    ).join('\n');
+
+    const thisWeekTx = d.thisWeekRecords.map(r =>
+      `  ${r.date} | ${r.vendor} | ฿${r.amount} | ${r.category}`
+    ).join('\n') || '  No transactions this week';
+
+    const lastWeekTx = d.lastWeekRecords.map(r =>
+      `  ${r.date} | ${r.vendor} | ฿${r.amount} | ${r.category}`
+    ).join('\n') || '  No transactions last week';
+
+    return `=== OLA THAI TAPAS BAR — COMPLETE EXPENSE DATA ===
+
+SUMMARY:
+- Total spend: ฿${d.totalSpend.toLocaleString()}
+- Total receipts: ${d.totalReceipts}
+- Voice notes logged: ${d.voiceCount}
+- This week total: ฿${d.thisWeekTotal.toLocaleString()} (${d.thisWeekRecords.length} transactions)
+- Last week total: ฿${d.lastWeekTotal.toLocaleString()} (${d.lastWeekRecords.length} transactions)
+- Week on week change: ${d.lastWeekTotal > 0 ? (((d.thisWeekTotal - d.lastWeekTotal) / d.lastWeekTotal) * 100).toFixed(1) + '%' : 'N/A'}
+- Lowest single expense: ฿${d.lowestExpense?.amount} at ${d.lowestExpense?.vendor} on ${d.lowestExpense?.date}
+- Highest single expense: ฿${d.highestExpense?.amount} at ${d.highestExpense?.vendor} on ${d.highestExpense?.date}
+
+CATEGORIES:
+${d.categories.map(c => `  ${c.name}: ฿${c.amount.toLocaleString()} (${c.pct}% of total)`).join('\n')}
+
+THIS WEEK TRANSACTIONS:
+${thisWeekTx}
+
+LAST WEEK TRANSACTIONS:
+${lastWeekTx}
+
+ALL TRANSACTIONS (most recent first):
+${allTx}
+
+=== END OF DATA ===`;
   }
 
   function buildBriefText(d) {
-    return `Good morning. Your expense summary for Ola Thai Tapas Bar. Total spend to date is ${d.totalSpend.toLocaleString()} Thai Baht across ${d.totalReceipts} receipts${d.voiceCount > 0 ? `, of which ${d.voiceCount} were logged via voice note` : ''}. Your biggest spend category is ${d.topCategory.name} at ${d.topCategory.amount.toLocaleString()} Baht — ${d.topCategory.pct} percent of all spend.${d.categories.length > 1 ? ` Other categories: ${d.categories.slice(1).map(c => `${c.name} ${c.amount.toLocaleString()} Baht`).join(', ')}.` : ''} Have a great week.`;
-  }
-
-  function getContext() {
-    if (!data) return '';
-    return `Ola Thai Tapas Bar expenses: Total ฿${data.totalSpend.toLocaleString()}, ${data.totalReceipts} receipts, ${data.voiceCount} voice notes. Categories: ${data.categories.map(c => `${c.name} ฿${c.amount.toLocaleString()} (${c.pct}%)`).join(', ')}. Recent: ${data.recent.slice(0, 5).map(r => `${r.vendor} ฿${r.amount} ${r.category} ${r.date}`).join('; ')}`;
+    return `Good morning. Your expense summary for Ola Thai Tapas Bar. Total spend to date is ${d.totalSpend.toLocaleString()} Thai Baht across ${d.totalReceipts} receipts${d.voiceCount > 0 ? `, of which ${d.voiceCount} were logged via voice note` : ''}. Your biggest spend category is ${d.topCategory.name} at ${d.topCategory.amount.toLocaleString()} Baht — ${d.topCategory.pct} percent of all spend.${d.categories.length > 1 ? ` Other categories: ${d.categories.slice(1).map(c => `${c.name} ${c.amount.toLocaleString()} Baht`).join(', ')}.` : ''} This week you spent ${d.thisWeekTotal.toLocaleString()} Baht. Have a great week.`;
   }
 
   async function generateSpeech(text) {
@@ -89,7 +179,13 @@ export default function Dashboard() {
     return URL.createObjectURL(await res.blob());
   }
 
-  async function callClaude(system, userMessage, maxTokens = 1000) {
+  async function callClaude(systemExtra, userMessage, maxTokens = 1000) {
+    const system = `You are a precise, knowledgeable CFO assistant for Ola Thai Tapas Bar Bangkok. You have access to EVERY expense transaction. Answer questions using ONLY the exact data provided — never guess or make up numbers. Always use ฿ for Thai Baht. No markdown, no asterisks, plain text only. If you cannot find the exact answer in the data, say so clearly.
+
+${getFullContext()}
+
+${systemExtra || ''}`;
+
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -111,55 +207,27 @@ export default function Dashboard() {
     setAudioLoading(false);
   }
 
-  // CONTINUOUS VOICE MODE
-  const setVoiceStateSynced = (state) => {
-    voiceStateRef.current = state;
-    setVoiceState(state);
-  };
+  const setVoiceStateSynced = (state) => { voiceStateRef.current = state; setVoiceState(state); };
 
   const startListening = useCallback(() => {
     if (!voiceModeRef.current) return;
     if (voiceStateRef.current !== 'idle') return;
-
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
-
     const recognition = new SR();
-    recognition.lang = 'en-US';
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
+    recognition.lang = 'en-US'; recognition.interimResults = true; recognition.maxAlternatives = 1;
     recognitionRef.current = recognition;
     voiceTranscriptRef.current = '';
-
-    recognition.onstart = () => {
-      setVoiceStateSynced('listening');
-      setVoiceTranscript('');
-    };
-
-    recognition.onresult = (e) => {
-      const t = Array.from(e.results).map(r => r[0].transcript).join('');
-      setVoiceTranscript(t);
-      voiceTranscriptRef.current = t;
-    };
-
+    recognition.onstart = () => { setVoiceStateSynced('listening'); setVoiceTranscript(''); };
+    recognition.onresult = (e) => { const t = Array.from(e.results).map(r => r[0].transcript).join(''); setVoiceTranscript(t); voiceTranscriptRef.current = t; };
     recognition.onend = () => {
       const transcript = voiceTranscriptRef.current.trim();
-      if (transcript && voiceModeRef.current) {
-        handleVoiceQuery(transcript);
-      } else if (voiceModeRef.current) {
-        // Nothing heard, restart listening after short pause
-        setVoiceStateSynced('idle');
-        setTimeout(() => { if (voiceModeRef.current) startListening(); }, 500);
-      }
+      if (transcript && voiceModeRef.current) { handleVoiceQuery(transcript); }
+      else if (voiceModeRef.current) { setVoiceStateSynced('idle'); setTimeout(() => { if (voiceModeRef.current) startListening(); }, 500); }
     };
-
     recognition.onerror = (e) => {
-      if (e.error === 'no-speech' || e.error === 'aborted') {
-        setVoiceStateSynced('idle');
-        setTimeout(() => { if (voiceModeRef.current) startListening(); }, 500);
-      }
+      if (e.error === 'no-speech' || e.error === 'aborted') { setVoiceStateSynced('idle'); setTimeout(() => { if (voiceModeRef.current) startListening(); }, 500); }
     };
-
     try { recognition.start(); } catch (e) { console.error(e); }
   }, []);
 
@@ -167,24 +235,14 @@ export default function Dashboard() {
     setVoiceStateSynced('thinking');
     setVoiceTranscript('');
     setVoiceConvo(c => [...c, { role: 'user', text: transcript }]);
-
     try {
-      const reply = await callClaude(
-        `You are a sharp, friendly CFO assistant for Ola Thai Tapas Bar Bangkok. This is a voice conversation — answer in 1-2 short sentences max. Use real numbers. Always use the Thai Baht symbol ฿ before amounts. No markdown or asterisks. Data: ${getContext()}`,
-        transcript, 200
-      );
+      const reply = await callClaude('This is a voice conversation. Keep your answer to 2-3 sentences maximum. Be direct and precise with exact figures from the data.', transcript, 300);
       setVoiceConvo(c => [...c, { role: 'ai', text: reply }]);
       setVoiceStateSynced('speaking');
-
       const url = await generateSpeech(reply);
       if (voiceAudioRef.current) {
-        voiceAudioRef.current.src = url;
-        voiceAudioRef.current.play();
-        voiceAudioRef.current.onended = () => {
-          setVoiceStateSynced('idle');
-          // Auto restart listening after speaking
-          setTimeout(() => { if (voiceModeRef.current) startListening(); }, 300);
-        };
+        voiceAudioRef.current.src = url; voiceAudioRef.current.play();
+        voiceAudioRef.current.onended = () => { setVoiceStateSynced('idle'); setTimeout(() => { if (voiceModeRef.current) startListening(); }, 300); };
       }
     } catch {
       setVoiceStateSynced('idle');
@@ -195,19 +253,12 @@ export default function Dashboard() {
 
   function toggleVoiceMode() {
     if (voiceModeRef.current) {
-      // Turn off
-      voiceModeRef.current = false;
-      setVoiceMode(false);
-      recognitionRef.current?.abort();
-      voiceAudioRef.current?.pause();
-      setVoiceStateSynced('idle');
-      setVoiceTranscript('');
+      voiceModeRef.current = false; setVoiceMode(false);
+      recognitionRef.current?.abort(); voiceAudioRef.current?.pause();
+      setVoiceStateSynced('idle'); setVoiceTranscript('');
     } else {
-      // Turn on
-      voiceModeRef.current = true;
-      setVoiceMode(true);
-      setVoiceConvo([]);
-      setVoiceStateSynced('idle');
+      voiceModeRef.current = true; setVoiceMode(true);
+      setVoiceConvo([]); setVoiceStateSynced('idle');
       setTimeout(() => startListening(), 500);
     }
   }
@@ -216,10 +267,7 @@ export default function Dashboard() {
     if (!text.trim() || aiThinking) return;
     setInput(''); setMessages(m => [...m, { role: 'user', text }]); setAiThinking(true);
     try {
-      const reply = await callClaude(
-        `You are a sharp CFO assistant for Ola Thai Tapas Bar Bangkok. Give direct answers with real numbers. Keep under 3 sentences. Always use ฿ for Thai Baht. No markdown. Data: ${getContext()}`,
-        text
-      );
+      const reply = await callClaude('Give a thorough answer using exact data. Up to 5 sentences if needed for complex questions.', text, 1000);
       setMessages(m => [...m, { role: 'ai', text: reply }]);
     } catch { setMessages(m => [...m, { role: 'ai', text: 'Connection error.' }]); }
     setAiThinking(false);
@@ -230,13 +278,6 @@ export default function Dashboard() {
   const weekRange = (() => { const now = new Date(); const mon = new Date(now); mon.setDate(now.getDate() - ((now.getDay() + 6) % 7)); const sun = new Date(mon); sun.setDate(mon.getDate() + 6); return `${mon.getDate()} – ${sun.getDate()} ${sun.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}`; })();
   const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-  const voiceStatusText = {
-    idle: voiceMode ? 'Listening...' : '',
-    listening: 'Listening...',
-    thinking: 'Thinking...',
-    speaking: 'Speaking...',
-  }[voiceState] || '';
 
   const voiceOrb = {
     idle: { bg: '#1a5276', shadow: 'none', emoji: '🎤' },
@@ -279,10 +320,10 @@ export default function Dashboard() {
     playBtn: { width: 40, height: 40, borderRadius: '50%', background: '#1a5276', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: '#7fc8f0', fontSize: 16 },
     chatPanel: { background: '#0a1a2b', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 10, padding: 18, marginBottom: '1.25rem' },
     aiDot: { width: 8, height: 8, borderRadius: '50%', background: '#3db88a', flexShrink: 0 },
-    msgs: { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14, maxHeight: 240, overflowY: 'auto', paddingRight: 4 },
+    msgs: { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14, maxHeight: 280, overflowY: 'auto', paddingRight: 4 },
     msgAi: { display: 'flex', gap: 8, alignItems: 'flex-start' },
     msgUser: { display: 'flex', gap: 8, alignItems: 'flex-start', flexDirection: 'row-reverse' },
-    bubbleAi: { fontSize: 12, lineHeight: 1.65, padding: '9px 13px', borderRadius: '3px 10px 10px 10px', maxWidth: '82%', background: '#112236', color: '#b8d4e8' },
+    bubbleAi: { fontSize: 12, lineHeight: 1.75, padding: '9px 13px', borderRadius: '3px 10px 10px 10px', maxWidth: '82%', background: '#112236', color: '#b8d4e8' },
     bubbleUser: { fontSize: 12, lineHeight: 1.65, padding: '9px 13px', borderRadius: '10px 3px 10px 10px', maxWidth: '82%', background: '#1a3a52', color: '#d4e8f5' },
     avAi: { width: 26, height: 26, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 600, flexShrink: 0, background: '#1a3a52', color: '#7fc8f0' },
     avUser: { width: 26, height: 26, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 600, flexShrink: 0, background: '#112236', color: '#4a6a88' },
@@ -324,14 +365,26 @@ export default function Dashboard() {
             <div style={s.metrics}>
               <div style={s.mc}><div style={s.mcLabel}>Total Spend</div><div style={s.mcVal}>฿{data.totalSpend.toLocaleString()}</div><div style={s.mcSub}>{data.totalReceipts} receipts</div></div>
               <div style={s.mc}><div style={s.mcLabel}>Top Category</div><div style={s.mcValWord}>{data.topCategory.name}</div><div style={s.mcSub}>฿{data.topCategory.amount.toLocaleString()} · {data.topCategory.pct}%</div></div>
-              <div style={s.mc}><div style={s.mcLabel}>Receipts Logged</div><div style={s.mcVal}>{data.totalReceipts}</div><div style={s.mcSubGreen}>✓ {data.voiceCount} voice notes</div></div>
-              <div style={s.mc}><div style={s.mcLabel}>Categories</div><div style={s.mcVal}>{data.categories.length}</div><div style={s.mcSub}>tracked</div></div>
+              <div style={s.mc}><div style={s.mcLabel}>This Week</div><div style={s.mcVal}>฿{data.thisWeekTotal.toLocaleString()}</div><div style={s.mcSub}>vs ฿{data.lastWeekTotal.toLocaleString()} last week</div></div>
+              <div style={s.mc}><div style={s.mcLabel}>Receipts</div><div style={s.mcVal}>{data.totalReceipts}</div><div style={s.mcSubGreen}>✓ {data.voiceCount} voice notes</div></div>
             </div>
 
             <div style={s.riskRow}>
-              <div style={s.riskCard('#e05252')}><div style={s.riskTag('#e05252')}>Top Spend</div><div style={s.riskVal}>{data.topCategory.name} · {data.topCategory.pct}%</div><div style={s.riskSub}>฿{data.topCategory.amount.toLocaleString()} — review weekly</div></div>
-              <div style={s.riskCard('#b07d2a')}><div style={s.riskTag('#b07d2a')}>Uncategorised</div><div style={s.riskVal}>{data.categories.find(c=>c.name==='Other')?`฿${data.categories.find(c=>c.name==='Other').amount.toLocaleString()}`:'฿0'}</div><div style={s.riskSub}>Review and recategorise Other</div></div>
-              <div style={s.riskCard('#3db88a')}><div style={s.riskTag('#3db88a')}>Voice Logging</div><div style={s.riskVal}>{data.voiceCount} voice notes</div><div style={s.riskSub}>{data.voiceCount>0?'Active via Telegram':'Try Telegram voice bot'}</div></div>
+              <div style={s.riskCard('#e05252')}>
+                <div style={s.riskTag('#e05252')}>Highest Expense</div>
+                <div style={s.riskVal}>฿{data.highestExpense?.amount.toLocaleString()} — {data.highestExpense?.vendor}</div>
+                <div style={s.riskSub}>{data.highestExpense?.date} · {data.highestExpense?.category}</div>
+              </div>
+              <div style={s.riskCard('#b07d2a')}>
+                <div style={s.riskTag('#b07d2a')}>Uncategorised</div>
+                <div style={s.riskVal}>{data.categories.find(c=>c.name==='Other')?`฿${data.categories.find(c=>c.name==='Other').amount.toLocaleString()}`:'฿0'}</div>
+                <div style={s.riskSub}>Other category — review and recategorise</div>
+              </div>
+              <div style={s.riskCard('#3db88a')}>
+                <div style={s.riskTag('#3db88a')}>Lowest Expense</div>
+                <div style={s.riskVal}>฿{data.lowestExpense?.amount.toLocaleString()} — {data.lowestExpense?.vendor}</div>
+                <div style={s.riskSub}>{data.lowestExpense?.date} · {data.lowestExpense?.category}</div>
+              </div>
             </div>
 
             <div style={s.chartsRow}>
@@ -398,73 +451,62 @@ export default function Dashboard() {
 
             <div style={s.chatPanel}>
               <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:16}}>
-                <div style={s.aiDot}/><div><div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>CFO Agent</div><div style={{fontSize:11,color:'#4a6a88'}}>Ask anything about your expenses</div></div>
+                <div style={s.aiDot}/><div><div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>CFO Agent — Full Data Access</div><div style={{fontSize:11,color:'#4a6a88'}}>Ask anything — every transaction, date, amount and vendor</div></div>
               </div>
               <div style={s.msgs} ref={msgsRef}>
                 {messages.map((m,i)=>(<div style={m.role==='ai'?s.msgAi:s.msgUser} key={i}><div style={m.role==='ai'?s.avAi:s.avUser}>{m.role==='ai'?'AI':'You'}</div><div style={m.role==='ai'?s.bubbleAi:s.bubbleUser}>{m.text}</div></div>))}
-                {aiThinking&&<div style={s.msgAi}><div style={s.avAi}>AI</div><div style={{...s.bubbleAi,color:'#4a6a88'}}>Thinking...</div></div>}
+                {aiThinking&&<div style={s.msgAi}><div style={s.avAi}>AI</div><div style={{...s.bubbleAi,color:'#4a6a88'}}>Analysing your data...</div></div>}
               </div>
-              <div style={s.qbtns}>{['Where can I cut costs? ↗','Which vendor costs most? ↗','Compare categories ↗'].map((q,i)=>(<button key={i} style={s.qbtn} onClick={()=>sendMessage(q.replace(' ↗',''))}>{q}</button>))}</div>
+              <div style={s.qbtns}>
+                {['What was my lowest expense? ↗','Which day had most spend? ↗','Where can I save money? ↗','This week vs last week ↗'].map((q,i)=>(
+                  <button key={i} style={s.qbtn} onClick={()=>sendMessage(q.replace(' ↗',''))}>{q}</button>
+                ))}
+              </div>
               <div style={s.inputRow}>
-                <input style={s.chatIn} placeholder="Ask about your expenses..." value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&sendMessage(input)}/>
+                <input style={s.chatIn} placeholder="Ask about any expense, date, vendor, or trend..." value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&sendMessage(input)}/>
                 <button style={s.sendBtn} onClick={()=>sendMessage(input)} disabled={aiThinking}>Send ↗</button>
               </div>
             </div>
 
-            {/* LIVE VOICE — CONTINUOUS MODE */}
             <div style={{background:'#07111e',border:`1px solid ${voiceMode?'#2471a3':'rgba(255,255,255,0.06)'}`,borderRadius:10,padding:18,transition:'border-color 0.3s'}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:voiceMode?20:0}}>
                 <div style={{display:'flex',alignItems:'center',gap:10}}>
                   <div style={{width:8,height:8,borderRadius:'50%',background:voiceMode?'#3db88a':'#4a6a88',boxShadow:voiceMode?'0 0 8px #3db88a':'none',transition:'all 0.3s'}}/>
                   <div>
-                    <div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>Live Voice CFO</div>
-                    <div style={{fontSize:11,color:'#4a6a88'}}>{voiceMode ? voiceStatusText || 'Listening for your question...' : 'Tap to start — just speak naturally'}</div>
+                    <div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>Live Voice CFO — Full Data Access</div>
+                    <div style={{fontSize:11,color:'#4a6a88'}}>{voiceMode ? (voiceState === 'listening' ? 'Listening...' : voiceState === 'thinking' ? 'Thinking...' : voiceState === 'speaking' ? 'Speaking...' : 'Ready — speak anytime') : 'Tap Start — ask any question about your expenses'}</div>
                   </div>
                 </div>
-                <button onClick={toggleVoiceMode} style={{fontSize:11,padding:'6px 16px',borderRadius:6,border:'none',background:voiceMode?'#e05252':'#1a5276',color:'white',cursor:'pointer',fontFamily:'Inter,sans-serif',fontWeight:500,transition:'background 0.2s'}}>
-                  {voiceMode ? 'Stop' : 'Start'}
+                <button onClick={toggleVoiceMode} style={{fontSize:11,padding:'6px 16px',borderRadius:6,border:'none',background:voiceMode?'#e05252':'#1a5276',color:'white',cursor:'pointer',fontFamily:'Inter,sans-serif',fontWeight:500}}>
+                  {voiceMode?'Stop':'Start'}
                 </button>
               </div>
 
               {voiceMode && (
                 <div>
-                  {/* Conversation */}
                   {voiceConvo.length > 0 && (
-                    <div ref={voiceConvoRef} style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16,maxHeight:180,overflowY:'auto'}}>
+                    <div ref={voiceConvoRef} style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16,maxHeight:200,overflowY:'auto'}}>
                       {voiceConvo.map((m,i)=>(<div style={m.role==='ai'?s.msgAi:s.msgUser} key={i}><div style={m.role==='ai'?s.avAi:s.avUser}>{m.role==='ai'?'AI':'You'}</div><div style={m.role==='ai'?s.bubbleAi:s.bubbleUser}>{m.text}</div></div>))}
                     </div>
                   )}
-
-                  {/* Live transcript */}
                   {voiceTranscript && (
                     <div style={{background:'#112236',borderRadius:8,padding:'8px 12px',marginBottom:14,fontSize:12,color:'#7fc8f0',fontStyle:'italic'}}>
                       {voiceTranscript}
                     </div>
                   )}
-
-                  {/* Orb */}
                   <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:12}}>
                     <div style={{position:'relative',display:'flex',alignItems:'center',justifyContent:'center',width:80,height:80}}>
-                      {voiceState === 'listening' && <>
-                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #1d8a6a'}} />
-                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #1d8a6a',animationDelay:'0.5s'}} />
-                      </>}
-                      {voiceState === 'speaking' && <>
-                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #2471a3'}} />
-                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #2471a3',animationDelay:'0.4s'}} />
-                      </>}
-                      <div
-                        className={voiceState === 'listening' || voiceState === 'speaking' ? 'orb-pulse' : ''}
-                        style={{width:64,height:64,borderRadius:'50%',background:voiceOrb.bg,boxShadow:voiceOrb.shadow,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,position:'relative',zIndex:1,transition:'background 0.3s, box-shadow 0.3s'}}
-                      >
+                      {voiceState==='listening'&&<><div className="orb-ring" style={{width:80,height:80,border:'2px solid #1d8a6a'}}/><div className="orb-ring" style={{width:80,height:80,border:'2px solid #1d8a6a',animationDelay:'0.5s'}}/></>}
+                      {voiceState==='speaking'&&<><div className="orb-ring" style={{width:80,height:80,border:'2px solid #2471a3'}}/><div className="orb-ring" style={{width:80,height:80,border:'2px solid #2471a3',animationDelay:'0.4s'}}/></>}
+                      <div className={voiceState==='listening'||voiceState==='speaking'?'orb-pulse':''} style={{width:64,height:64,borderRadius:'50%',background:voiceOrb.bg,boxShadow:voiceOrb.shadow,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,position:'relative',zIndex:1,transition:'background 0.3s'}}>
                         {voiceOrb.emoji}
                       </div>
                     </div>
-                    <div style={{fontSize:12,color:'#4a6a88',textAlign:'center'}}>
-                      {voiceState === 'listening' && 'Listening — speak your question'}
-                      {voiceState === 'thinking' && 'Processing your question...'}
-                      {voiceState === 'speaking' && 'CFO is responding...'}
-                      {voiceState === 'idle' && 'Ready — speak anytime'}
+                    <div style={{fontSize:11,color:'#4a6a88',textAlign:'center'}}>
+                      {voiceState==='listening'&&'Listening — speak your question'}
+                      {voiceState==='thinking'&&'Searching through your data...'}
+                      {voiceState==='speaking'&&'CFO is responding...'}
+                      {voiceState==='idle'&&'Ready — speak anytime'}
                     </div>
                   </div>
                 </div>
