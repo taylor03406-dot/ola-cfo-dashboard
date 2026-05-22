@@ -14,11 +14,18 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: max_tokens || 1000,
-        system,
+        system: (system || '') + ' IMPORTANT: Do not use markdown formatting, asterisks, or bold text. Plain text only. Always use the Thai Baht symbol ฿ (not B or THB) before all amounts.',
         messages
       })
     });
     const data = await response.json();
+    if (data.content && data.content[0] && data.content[0].text) {
+      data.content[0].text = data.content[0].text
+        .replace(/\*\*/g, '')
+        .replace(/\*/g, '')
+        .replace(/\bB(\d)/g, '฿$1')
+        .replace(/\bTHB\s*/g, '฿');
+    }
     res.status(200).json(data);
   } catch (e) {
     res.status(500).json({ error: 'Failed' });
