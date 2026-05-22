@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 
 const CAT_COLORS = [
   '#2471a3', '#1d8a6a', '#b07d2a', '#e05252', '#8e44ad', '#e67e22', '#3a7ca5',
@@ -16,19 +16,21 @@ export default function Dashboard() {
   const [audioUrl, setAudioUrl] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
+
+  // Voice mode state
   const [voiceMode, setVoiceMode] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [voiceThinking, setVoiceThinking] = useState(false);
-  const [voiceSpeaking, setVoiceSpeaking] = useState(false);
+  const [voiceState, setVoiceState] = useState('idle'); // idle | listening | thinking | speaking
   const [voiceTranscript, setVoiceTranscript] = useState('');
   const [voiceConvo, setVoiceConvo] = useState([]);
-  const [voiceStatus, setVoiceStatus] = useState('Press the mic to start');
+
   const audioRef = useRef(null);
   const voiceAudioRef = useRef(null);
   const recognitionRef = useRef(null);
   const msgsRef = useRef(null);
   const voiceConvoRef = useRef(null);
   const voiceTranscriptRef = useRef('');
+  const voiceModeRef = useRef(false);
+  const voiceStateRef = useRef('idle');
 
   useEffect(() => {
     fetch('/api/expenses')
@@ -109,40 +111,104 @@ export default function Dashboard() {
     setAudioLoading(false);
   }
 
-  function startListening() {
+  // CONTINUOUS VOICE MODE
+  const setVoiceStateSynced = (state) => {
+    voiceStateRef.current = state;
+    setVoiceState(state);
+  };
+
+  const startListening = useCallback(() => {
+    if (!voiceModeRef.current) return;
+    if (voiceStateRef.current !== 'idle') return;
+
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setVoiceStatus('Not supported. Use Chrome.'); return; }
+    if (!SR) return;
+
     const recognition = new SR();
-    recognition.lang = 'en-US'; recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
     recognitionRef.current = recognition;
     voiceTranscriptRef.current = '';
-    recognition.onstart = () => { setListening(true); setVoiceStatus('Listening...'); setVoiceTranscript(''); };
-    recognition.onresult = (e) => { const t = Array.from(e.results).map(r => r[0].transcript).join(''); setVoiceTranscript(t); voiceTranscriptRef.current = t; };
-    recognition.onend = () => { setListening(false); if (voiceTranscriptRef.current.trim()) handleVoiceQuery(voiceTranscriptRef.current); };
-    recognition.onerror = (e) => { setListening(false); setVoiceStatus('Mic error: ' + e.error); };
-    recognition.start();
-  }
 
-  function stopListening() { recognitionRef.current?.stop(); setListening(false); }
+    recognition.onstart = () => {
+      setVoiceStateSynced('listening');
+      setVoiceTranscript('');
+    };
+
+    recognition.onresult = (e) => {
+      const t = Array.from(e.results).map(r => r[0].transcript).join('');
+      setVoiceTranscript(t);
+      voiceTranscriptRef.current = t;
+    };
+
+    recognition.onend = () => {
+      const transcript = voiceTranscriptRef.current.trim();
+      if (transcript && voiceModeRef.current) {
+        handleVoiceQuery(transcript);
+      } else if (voiceModeRef.current) {
+        // Nothing heard, restart listening after short pause
+        setVoiceStateSynced('idle');
+        setTimeout(() => { if (voiceModeRef.current) startListening(); }, 500);
+      }
+    };
+
+    recognition.onerror = (e) => {
+      if (e.error === 'no-speech' || e.error === 'aborted') {
+        setVoiceStateSynced('idle');
+        setTimeout(() => { if (voiceModeRef.current) startListening(); }, 500);
+      }
+    };
+
+    try { recognition.start(); } catch (e) { console.error(e); }
+  }, []);
 
   async function handleVoiceQuery(transcript) {
-    setVoiceThinking(true); setVoiceStatus('Thinking...');
+    setVoiceStateSynced('thinking');
+    setVoiceTranscript('');
     setVoiceConvo(c => [...c, { role: 'user', text: transcript }]);
+
     try {
       const reply = await callClaude(
-        `You are a sharp, friendly CFO assistant for Ola Thai Tapas Bar Bangkok. This is a voice conversation — answer in 1-2 short sentences max. Use real numbers. Data: ${getContext()}`,
+        `You are a sharp, friendly CFO assistant for Ola Thai Tapas Bar Bangkok. This is a voice conversation — answer in 1-2 short sentences max. Use real numbers. Always use the Thai Baht symbol ฿ before amounts. No markdown or asterisks. Data: ${getContext()}`,
         transcript, 200
       );
       setVoiceConvo(c => [...c, { role: 'ai', text: reply }]);
-      setVoiceThinking(false); setVoiceStatus('Speaking...'); setVoiceSpeaking(true);
+      setVoiceStateSynced('speaking');
+
       const url = await generateSpeech(reply);
       if (voiceAudioRef.current) {
-        voiceAudioRef.current.src = url; voiceAudioRef.current.play();
-        voiceAudioRef.current.onended = () => { setVoiceSpeaking(false); setVoiceStatus('Tap mic to ask another question'); };
+        voiceAudioRef.current.src = url;
+        voiceAudioRef.current.play();
+        voiceAudioRef.current.onended = () => {
+          setVoiceStateSynced('idle');
+          // Auto restart listening after speaking
+          setTimeout(() => { if (voiceModeRef.current) startListening(); }, 300);
+        };
       }
     } catch {
-      setVoiceThinking(false); setVoiceSpeaking(false); setVoiceStatus('Error. Try again.');
+      setVoiceStateSynced('idle');
       setVoiceConvo(c => [...c, { role: 'ai', text: 'Connection error.' }]);
+      setTimeout(() => { if (voiceModeRef.current) startListening(); }, 1000);
+    }
+  }
+
+  function toggleVoiceMode() {
+    if (voiceModeRef.current) {
+      // Turn off
+      voiceModeRef.current = false;
+      setVoiceMode(false);
+      recognitionRef.current?.abort();
+      voiceAudioRef.current?.pause();
+      setVoiceStateSynced('idle');
+      setVoiceTranscript('');
+    } else {
+      // Turn on
+      voiceModeRef.current = true;
+      setVoiceMode(true);
+      setVoiceConvo([]);
+      setVoiceStateSynced('idle');
+      setTimeout(() => startListening(), 500);
     }
   }
 
@@ -151,7 +217,7 @@ export default function Dashboard() {
     setInput(''); setMessages(m => [...m, { role: 'user', text }]); setAiThinking(true);
     try {
       const reply = await callClaude(
-        `You are a sharp CFO assistant for Ola Thai Tapas Bar Bangkok. Give direct answers with real numbers. Keep under 3 sentences. Data: ${getContext()}`,
+        `You are a sharp CFO assistant for Ola Thai Tapas Bar Bangkok. Give direct answers with real numbers. Keep under 3 sentences. Always use ฿ for Thai Baht. No markdown. Data: ${getContext()}`,
         text
       );
       setMessages(m => [...m, { role: 'ai', text: reply }]);
@@ -164,6 +230,20 @@ export default function Dashboard() {
   const weekRange = (() => { const now = new Date(); const mon = new Date(now); mon.setDate(now.getDate() - ((now.getDay() + 6) % 7)); const sun = new Date(mon); sun.setDate(mon.getDate() + 6); return `${mon.getDate()} – ${sun.getDate()} ${sun.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}`; })();
   const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  const voiceStatusText = {
+    idle: voiceMode ? 'Listening...' : '',
+    listening: 'Listening...',
+    thinking: 'Thinking...',
+    speaking: 'Speaking...',
+  }[voiceState] || '';
+
+  const voiceOrb = {
+    idle: { bg: '#1a5276', shadow: 'none', emoji: '🎤' },
+    listening: { bg: '#1d8a6a', shadow: '0 0 30px rgba(29,138,106,0.6)', emoji: '🎤' },
+    thinking: { bg: '#b07d2a', shadow: '0 0 30px rgba(176,125,42,0.6)', emoji: '⏳' },
+    speaking: { bg: '#2471a3', shadow: '0 0 30px rgba(36,113,163,0.6)', emoji: '🔊' },
+  }[voiceState];
 
   const s = {
     shell: { maxWidth: 1000, margin: '0 auto', padding: '1.5rem 1.5rem 4rem', fontFamily: "'Inter', sans-serif", color: '#e2e8f0' },
@@ -225,10 +305,10 @@ export default function Dashboard() {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body { background: #0d1f33; min-height: 100vh; }
         body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
-        @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.08)} }
-        @keyframes ripple { 0%{transform:scale(1);opacity:0.6} 100%{transform:scale(2.2);opacity:0} }
-        .mic-pulse { animation: pulse 1s infinite; }
-        .mic-ring { position:absolute;border-radius:50%;border:2px solid #e05252;animation:ripple 1.2s infinite; }
+        @keyframes orbPulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.06)} }
+        @keyframes ripple { 0%{transform:scale(1);opacity:0.5} 100%{transform:scale(2);opacity:0} }
+        .orb-pulse { animation: orbPulse 1.5s ease-in-out infinite; }
+        .orb-ring { position:absolute;border-radius:50%;animation:ripple 1.5s ease-out infinite; }
       `}</style>
       <audio ref={audioRef} style={{display:'none'}} />
       <audio ref={voiceAudioRef} style={{display:'none'}} />
@@ -331,41 +411,62 @@ export default function Dashboard() {
               </div>
             </div>
 
+            {/* LIVE VOICE — CONTINUOUS MODE */}
             <div style={{background:'#07111e',border:`1px solid ${voiceMode?'#2471a3':'rgba(255,255,255,0.06)'}`,borderRadius:10,padding:18,transition:'border-color 0.3s'}}>
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:voiceMode?16:0}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:voiceMode?20:0}}>
                 <div style={{display:'flex',alignItems:'center',gap:10}}>
-                  <div style={{width:8,height:8,borderRadius:'50%',background:voiceMode?'#e05252':'#4a6a88'}}/>
-                  <div><div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>Live Voice CFO</div><div style={{fontSize:11,color:'#4a6a88'}}>Talk to your CFO agent in real time</div></div>
+                  <div style={{width:8,height:8,borderRadius:'50%',background:voiceMode?'#3db88a':'#4a6a88',boxShadow:voiceMode?'0 0 8px #3db88a':'none',transition:'all 0.3s'}}/>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:600,color:'#b8d4e8'}}>Live Voice CFO</div>
+                    <div style={{fontSize:11,color:'#4a6a88'}}>{voiceMode ? voiceStatusText || 'Listening for your question...' : 'Tap to start — just speak naturally'}</div>
+                  </div>
                 </div>
-                <button onClick={()=>{setVoiceMode(v=>!v);setVoiceConvo([]);setVoiceStatus('Press the mic to start');}} style={{fontSize:11,padding:'6px 14px',borderRadius:6,border:'1px solid rgba(255,255,255,0.1)',background:voiceMode?'#1a3a52':'transparent',color:voiceMode?'#7fc8f0':'#6a9cc0',cursor:'pointer',fontFamily:'Inter,sans-serif'}}>
-                  {voiceMode?'Close':'Open'}
+                <button onClick={toggleVoiceMode} style={{fontSize:11,padding:'6px 16px',borderRadius:6,border:'none',background:voiceMode?'#e05252':'#1a5276',color:'white',cursor:'pointer',fontFamily:'Inter,sans-serif',fontWeight:500,transition:'background 0.2s'}}>
+                  {voiceMode ? 'Stop' : 'Start'}
                 </button>
               </div>
-              {voiceMode&&(
+
+              {voiceMode && (
                 <div>
-                  {voiceConvo.length>0&&(
-                    <div ref={voiceConvoRef} style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16,maxHeight:200,overflowY:'auto',paddingRight:4}}>
+                  {/* Conversation */}
+                  {voiceConvo.length > 0 && (
+                    <div ref={voiceConvoRef} style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16,maxHeight:180,overflowY:'auto'}}>
                       {voiceConvo.map((m,i)=>(<div style={m.role==='ai'?s.msgAi:s.msgUser} key={i}><div style={m.role==='ai'?s.avAi:s.avUser}>{m.role==='ai'?'AI':'You'}</div><div style={m.role==='ai'?s.bubbleAi:s.bubbleUser}>{m.text}</div></div>))}
                     </div>
                   )}
-                  {(listening||voiceTranscript)&&(
-                    <div style={{background:'#112236',borderRadius:8,padding:'10px 14px',marginBottom:14,fontSize:12,color:listening?'#7fc8f0':'#4a6a88',fontStyle:'italic',minHeight:36}}>
-                      {voiceTranscript||'Listening...'}
+
+                  {/* Live transcript */}
+                  {voiceTranscript && (
+                    <div style={{background:'#112236',borderRadius:8,padding:'8px 12px',marginBottom:14,fontSize:12,color:'#7fc8f0',fontStyle:'italic'}}>
+                      {voiceTranscript}
                     </div>
                   )}
-                  <div style={{textAlign:'center',marginBottom:16,fontSize:12,color:'#4a6a88'}}>
-                    {voiceThinking?'🤔 Thinking...':voiceSpeaking?'🔊 Speaking...':voiceStatus}
-                  </div>
-                  <div style={{display:'flex',justifyContent:'center'}}>
-                    <div style={{position:'relative',display:'flex',alignItems:'center',justifyContent:'center',width:72,height:72}}>
-                      {listening&&<><div className="mic-ring" style={{width:72,height:72}}/><div className="mic-ring" style={{width:72,height:72,animationDelay:'0.4s'}}/></>}
-                      <button className={listening?'mic-pulse':''} onClick={listening?stopListening:startListening} disabled={voiceThinking||voiceSpeaking}
-                        style={{width:64,height:64,borderRadius:'50%',border:'none',cursor:(voiceThinking||voiceSpeaking)?'not-allowed':'pointer',background:listening?'#e05252':(voiceThinking||voiceSpeaking)?'#1a3a52':'#1a5276',color:'white',fontSize:26,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',zIndex:1,transition:'background 0.2s',opacity:(voiceThinking||voiceSpeaking)?0.5:1}}>
-                        {voiceThinking?'⏳':voiceSpeaking?'🔊':listening?'⏹':'🎤'}
-                      </button>
+
+                  {/* Orb */}
+                  <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:12}}>
+                    <div style={{position:'relative',display:'flex',alignItems:'center',justifyContent:'center',width:80,height:80}}>
+                      {voiceState === 'listening' && <>
+                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #1d8a6a'}} />
+                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #1d8a6a',animationDelay:'0.5s'}} />
+                      </>}
+                      {voiceState === 'speaking' && <>
+                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #2471a3'}} />
+                        <div className="orb-ring" style={{width:80,height:80,border:'2px solid #2471a3',animationDelay:'0.4s'}} />
+                      </>}
+                      <div
+                        className={voiceState === 'listening' || voiceState === 'speaking' ? 'orb-pulse' : ''}
+                        style={{width:64,height:64,borderRadius:'50%',background:voiceOrb.bg,boxShadow:voiceOrb.shadow,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,position:'relative',zIndex:1,transition:'background 0.3s, box-shadow 0.3s'}}
+                      >
+                        {voiceOrb.emoji}
+                      </div>
+                    </div>
+                    <div style={{fontSize:12,color:'#4a6a88',textAlign:'center'}}>
+                      {voiceState === 'listening' && 'Listening — speak your question'}
+                      {voiceState === 'thinking' && 'Processing your question...'}
+                      {voiceState === 'speaking' && 'CFO is responding...'}
+                      {voiceState === 'idle' && 'Ready — speak anytime'}
                     </div>
                   </div>
-                  <div style={{textAlign:'center',marginTop:10,fontSize:10,color:'#2a4a62'}}>{listening?'Tap to stop':'Tap mic to speak'}</div>
                 </div>
               )}
             </div>
